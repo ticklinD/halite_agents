@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from textual.app import App
 from textual import events
-from textual.widgets import Footer
 
 from halite.models.schemas import Message, Session
 from halite.config.settings import load_config, save_config, AppConfig
@@ -26,7 +25,6 @@ from halite.ui.screens.chat_screen import ChatScreen, MessageSubmitted
 from halite.ui.screens.history_screen import HistoryScreen
 from halite.ui.screens.config_screen import ConfigScreen
 from halite.ui.screens.debug_screen import DebugScreen
-from halite.ui.widgets.status_bar import StatusBar
 from halite.ui.widgets.log_panel import LogPanel
 from halite.ui.widgets.diff_view import DiffView
 from halite.utils.logging_config import (
@@ -100,7 +98,6 @@ class HaliteApp(App):
         register_handlers(self.dispatcher, self)
 
         # UI references
-        self.status_bar: StatusBar | None = None
         self.log_panel: LogPanel | None = None
         self.diff_view: DiffView | None = None
 
@@ -117,15 +114,12 @@ class HaliteApp(App):
     # ── Textual lifecycle ────────────────────────────────────────────────────
 
     def compose(self):
-        # Shared chrome: status bar, log panel, diff view, footer.
+        # Shared chrome: log panel, diff view (hidden by default, shown on demand).
         # ChatScreen is the default screen (see DEFAULT_SCREEN).
-        self.status_bar = StatusBar()
-        yield self.status_bar
         self.log_panel = LogPanel()
         yield self.log_panel
         self.diff_view = DiffView()
         yield self.diff_view
-        yield Footer()
 
     # ── Session management ──────────────────────────────────────────────────
 
@@ -141,9 +135,6 @@ class HaliteApp(App):
         self.history.create_session(session)
         set_correlation_context(session_id=str(session.id))
         logger.info("New session created: {}", session.id)
-        if hasattr(self, "status_bar") and self.status_bar:
-            self.status_bar.model_name = self.active_model or "none"
-            self.status_bar.backend = self.active_backend
 
     def config_project_root(self) -> Path | None:
         """Get the configured project root (from config if set, else cwd)."""
@@ -204,10 +195,7 @@ class HaliteApp(App):
         self.active_model = pick
         logger.info("Active model selected: {}", pick)
 
-        # Reflect in status bar and session record
-        if hasattr(self, "status_bar") and self.status_bar:
-            self.status_bar.model_name = pick
-            self.status_bar.backend = self.active_backend
+        # Reflect in session record
         if self.current_session:
             self.current_session.active_model = pick
             self.current_session.backend = self.active_backend
@@ -330,8 +318,8 @@ class HaliteApp(App):
         Route to the appropriate backend based on the active backend/model,
         get a response, display it, and persist it (§4 Router).
         """
-        # Display a "thinking" indicator
-        chat._show_system_message("  ···")
+        # Show thinking indicator
+        chat.show_thinking("Generating…")
 
         response = ""
         try:
@@ -340,6 +328,7 @@ class HaliteApp(App):
                 from halite.config.secrets import retrieve_secret
                 key = retrieve_secret("anthropic_api_key")
                 if not key:
+                    chat.hide_thinking()
                     chat._show_error_message(
                         "No Anthropic API key configured. Use /config to add one, "
                         "or /model to switch to a local model."
@@ -352,7 +341,8 @@ class HaliteApp(App):
                 # Local via Ollama
                 response = await self.ollama.chat(self.active_model, messages)
 
-            # Remove the thinking indicator (redraw by re-rendering)
+            # Hide thinking and show response
+            chat.hide_thinking()
             chat._show_assistant_message(response)
             logger.info("Response received ({} chars)", len(response))
 
@@ -366,6 +356,7 @@ class HaliteApp(App):
             self.history.add_message(dog)
 
         except Exception as exc:
+            chat.hide_thinking()
             logger.exception("Failed to get model response: {}", str(exc))
             chat._show_error_message(f"Failed to get model response: {exc}")
 
@@ -380,15 +371,6 @@ class HaliteApp(App):
         if not self.active_model:
             await self._discover_models()
 
-        # Update status bar
-        if self.status_bar:
-            self.status_bar.update_all(
-                model=self.active_model or "none",
-                backend=self.active_backend,
-                project=str(self.current_session.project_path) if self.current_session and self.current_session.project_path else ".",
-                cost="$0.00",
-                trust=self.config.trust_level,
-            )
         logger.info("Halite UI mounted")
 
     async def action_quit(self) -> None:
