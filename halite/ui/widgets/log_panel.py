@@ -19,7 +19,6 @@ class LogPanel(Static):
 
     DEFAULT_CSS = """
     LogPanel {
-        dock: bottom;
         height: 10;
         background: $surface;
         border-top: solid $accent;

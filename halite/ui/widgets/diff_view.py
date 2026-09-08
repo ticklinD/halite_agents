@@ -15,7 +15,6 @@ class DiffView(Static):
 
     DEFAULT_CSS = """
     DiffView {
-        dock: bottom;
         height: 15;
         background: $surface;
         border-top: solid $accent;
