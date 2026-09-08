@@ -73,17 +73,11 @@ export default function App({ backend }: Props) {
     backend.send({ type: 'user_input', text })
   }, [backend])
 
-  // Allow Ctrl+C to quit
-  useEffect(() => {
-    const onKey = (data: Buffer) => {
-      if (data.toString() === '\u0003') {
-        // Ctrl+C
-        process.exit(0)
-      }
-    }
-    process.stdin.on('data', onKey)
-    return () => { process.stdin.removeListener('data', onKey) }
-  }, [])
+  // Graceful quit: tell the backend to shut down, then exit once it's done
+  const handleQuit = useCallback(() => {
+    backend.stop()
+    setTimeout(() => process.exit(0), 2000)
+  }, [backend])
 
   return (
     <Box flexDirection="column" height="100%">
@@ -107,7 +101,7 @@ export default function App({ backend }: Props) {
 
       {/* Input bar */}
       <Box>
-        <InputBar onSubmit={handleSubmit} disabled={inputDisabled} />
+        <InputBar onSubmit={handleSubmit} disabled={inputDisabled} onQuit={handleQuit} />
       </Box>
 
       {/* Status bar */}

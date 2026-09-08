@@ -39,6 +39,12 @@ cd ../..
 ./scripts/run.sh --debug    # start with debug logging enabled
 ```
 
+On Windows (PowerShell):
+
+```powershell
+.\scripts\run.ps1           # creates .venv if needed, builds Ink, starts the TUI
+```
+
 The TUI renders inline (like normal command output) — scrollable chat, a
 spinning "Generating…" indicator while the model works, and a status bar with
 the active model. Press Enter to send, Ctrl+C to quit.

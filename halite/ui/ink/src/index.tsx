@@ -27,3 +27,16 @@ render(React.createElement(App, { backend }))
 backend.on('exit', code => {
   process.exit(code ?? 0)
 })
+
+// Graceful shutdown on Ctrl+C / SIGTERM: tell the backend to quit and let it
+// clean up (session persistence, DB close) instead of abruptly dropping the
+// pipe. Works on Linux and Windows.
+let shuttingDown = false
+const shutdown = () => {
+  if (shuttingDown) return
+  shuttingDown = true
+  backend.stop()
+  setTimeout(() => process.exit(0), 2000)
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)

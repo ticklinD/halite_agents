@@ -25,6 +25,7 @@ from halite.utils.logging_config import (
 )
 
 import os
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -148,34 +149,49 @@ class HaliteBackend:
         await asyncio.get_event_loop().run_in_executor(None, sys.stdout.flush)
 
     async def _read_loop(self) -> None:
-        """Read JSON messages from stdin (from Node)."""
+        """Read JSON messages from stdin (from Node).
+
+        Uses a dedicated reader thread instead of loop.connect_read_pipe():
+        on Windows the ProactorEventLoop crashes with "WinError 6: The handle
+        is invalid" / "'_ProactorReadPipeTransport' object has no attribute
+        '_empty_waiter'" when the parent process closes the pipe. A plain
+        blocking thread works identically on Linux and Windows.
+        """
         loop = asyncio.get_event_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        def _reader() -> None:
+            try:
+                while True:
+                    raw = sys.stdin.buffer.readline()
+                    if not raw:  # EOF — parent closed the pipe
+                        break
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, raw.decode("utf-8", errors="replace")
+                    )
+            except Exception:
+                pass
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        threading.Thread(target=_reader, name="halite-stdin", daemon=True).start()
 
         buffer = ""
         while True:
-            try:
-                chunk = await reader.read(4096)
-                if not chunk:
-                    break
-                buffer += chunk.decode()
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        msg = json.loads(line)
-                        await self._handle_message(msg)
-                    except json.JSONDecodeError:
-                        logger.warning("Malformed JSON from frontend: {}", line[:100])
-            except asyncio.CancelledError:
+            line = await queue.get()
+            if line is None:
                 break
-            except Exception as e:
-                logger.error("read loop error: {}", e)
-                break
+            buffer += line
+            while "\n" in buffer:
+                raw, buffer = buffer.split("\n", 1)
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                    await self._handle_message(msg)
+                except json.JSONDecodeError:
+                    logger.warning("Malformed JSON from frontend: {}", raw[:100])
 
     async def _handle_message(self, msg: dict) -> None:
         """Handle a message from the Node frontend."""
@@ -337,6 +353,14 @@ class HaliteBackend:
 
 
 async def main() -> None:
+    # Windows: ensure UTF-8 on stdio so JSON (and non-ASCII text like the
+    # "Generating…" label) round-trips correctly regardless of console codepage.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     debug = "--debug" in sys.argv
     backend = HaliteBackend(debug=debug)
     await backend.run()

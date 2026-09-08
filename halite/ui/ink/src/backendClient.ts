@@ -11,17 +11,18 @@ import { createInterface } from 'node:readline'
 import type { PythonToInk, InkToPython } from './lib/ipcTypes.js'
 
 const resolvePython = (): string => {
-  // Look for the project venv first
+  // Look for the project venv first (Unix and Windows layouts)
   const candidates = [
     process.env.HALITE_PYTHON,
     resolve(process.cwd(), '.venv/bin/python'),
     resolve(process.cwd(), '.venv/bin/python3'),
+    resolve(process.cwd(), '.venv/Scripts/python.exe'),
   ].filter(Boolean) as string[]
 
   for (const p of candidates) {
     if (existsSync(p)) return p
   }
-  return 'python3'
+  return process.platform === 'win32' ? 'python' : 'python3'
 }
 
 export class BackendClient extends EventEmitter {

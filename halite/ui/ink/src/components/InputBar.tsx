@@ -4,9 +4,10 @@ import { Box, Text, useInput } from 'ink'
 type Props = {
   onSubmit: (text: string) => void
   disabled?: boolean
+  onQuit?: () => void
 }
 
-export function InputBar({ onSubmit, disabled }: Props) {
+export function InputBar({ onSubmit, disabled, onQuit }: Props) {
   const [value, setValue] = useState('')
   const [cursorVisible, setCursorVisible] = useState(true)
 
@@ -27,7 +28,8 @@ export function InputBar({ onSubmit, disabled }: Props) {
     }
 
     if (key.ctrl && input === 'c') {
-      process.exit(0)
+      onQuit?.()
+      return
     }
 
     // Regular character
