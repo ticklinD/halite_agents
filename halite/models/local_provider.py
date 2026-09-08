@@ -60,12 +60,22 @@ class OllamaProvider:
     # load at the default context but responds in ~8 s with num_ctx=2048.)
     DEFAULT_NUM_CTX: int = 2048
 
+    # Default maximum output tokens per completion.
+    #
+    # Small Qwen models with thinking mode enabled can generate an enormous
+    # chain-of-thought before answering. Without a cap, a trivial prompt like
+    # "say hi" can burn the entire 2048-token context on reasoning, hit the
+    # context limit, and return HTTP 500. Capping output tokens keeps
+    # responses bounded and usable on low-RAM hardware.
+    DEFAULT_NUM_PREDICT: int = 512
+
     async def chat(
         self,
         model: str,
         messages: list[dict],
         temperature: float = 0.7,
         num_ctx: int | None = None,
+        num_predict: int | None = None,
     ) -> str:
         """
         Send a chat completion request to Ollama.
@@ -78,7 +88,14 @@ class OllamaProvider:
             "options": {
                 "temperature": temperature,
                 "num_ctx": num_ctx or self.DEFAULT_NUM_CTX,
+                "num_predict": num_predict or self.DEFAULT_NUM_PREDICT,
             },
+            # Qwen3-style thinking mode: disable it so the model answers
+            # directly instead of burning the token budget (and the display)
+            # on a long chain-of-thought. With num_predict capped, thinking
+            # mode would otherwise consume the whole budget and return an
+            # empty `content` (the reply ends up in `thinking`).
+            "think": False,
         }
         try:
             resp = await self._client.post("/api/chat", json=payload)
@@ -125,6 +142,7 @@ class OllamaProvider:
         messages: list[dict],
         temperature: float = 0.7,
         num_ctx: int | None = None,
+        num_predict: int | None = None,
     ) -> AsyncIterator[str]:
         """
         Stream a chat completion from Ollama, yielding content chunks.
@@ -136,7 +154,9 @@ class OllamaProvider:
             "options": {
                 "temperature": temperature,
                 "num_ctx": num_ctx or self.DEFAULT_NUM_CTX,
+                "num_predict": num_predict or self.DEFAULT_NUM_PREDICT,
             },
+            "think": False,
         }
         try:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:

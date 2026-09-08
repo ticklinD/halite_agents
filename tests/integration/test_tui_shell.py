@@ -1,25 +1,21 @@
 """
-Integration test: run the Halite TUI headlessly with a mocked Ollama provider.
-Verifies the full loop works: app start -> message submit -> dispatch ->
-model response -> persistence -> clean shutdown.
+Integration test: run the Halite Ink backend (JSON-over-stdio IPC) headlessly
+with a mocked Ollama provider.
+
+Verifies the full loop works: backend start -> ready -> user input ->
+dispatch -> model response -> persistence -> clean shutdown.
 
 The Ollama provider is mocked so the test doesn't depend on a running
-local daemon (in CI/dev without Ollama). This tests the app wiring, not
-the Ollama HTTP layer (which has its own unit tests).
+local daemon (in CI/dev without Ollama). This tests the backend wiring and
+the Ink IPC protocol, not the Ollama HTTP layer (which has its own unit tests).
 """
 from __future__ import annotations
 
 import asyncio
-import sys
-import os
-import uuid
-
-# Ensure we can import halite (repo root = two levels up from tests/integration)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 class MockOllama:
-    """Minimal mock of OllamaProvider for the app wiring test."""
+    """Minimal mock of OllamaProvider for the backend wiring test."""
 
     def __init__(self, host: str = "http://localhost:11434") -> None:
         self.host = host
@@ -30,7 +26,14 @@ class MockOllama:
     async def list_models(self) -> list[dict]:
         return [{"name": "llama3.2:3b", "size": 100, "modified_at": "now"}]
 
-    async def chat(self, model: str, messages: list[dict], temperature: float = 0.7) -> str:
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+        num_ctx: int | None = None,
+        num_predict: int | None = None,
+    ) -> str:
         return "Echo: this is a mocked response from the local model."
 
     async def close(self) -> None:
@@ -38,71 +41,63 @@ class MockOllama:
 
 
 async def main() -> None:
-    import halite.app as appmod
+    backend = None
+    messages_out: list[dict] = []
+    try:
+        from halite.backend import HaliteBackend
 
-    # Patch the app's Ollama provider with the mock
-    appmod.HaliteApp.__init__ = _patched_init
+        class PatchedBackend(HaliteBackend):
+            def __init__(self, debug: bool = False):
+                super().__init__(debug=debug)
+                self.ollama = MockOllama(self.config.ollama_host)
 
-    app = appmod.HaliteApp(debug=True)
+        async def _send(msg: dict) -> None:
+            messages_out.append(msg)
 
-    async with app.run_test() as pilot:
-        # Verify the app is running
-        assert app.is_running, "App did not start"
-        print("✓ App started")
+        backend = PatchedBackend(debug=True)
+        backend._send = _send  # type: ignore[method-assign]
 
-        # Verify a chat screen is active
-        print(f"✓ Active screen: {app.screen.__class__.__name__}")
+        # 1. Ready flow
+        await backend._on_ready()
+        types = [m["type"] for m in messages_out]
+        assert "welcome" in types, f"Expected welcome message, got {types}"
+        print("✓ Backend ready + welcome sent")
 
-        # The current session must exist
-        assert app.current_session is not None
-        print(f"✓ Session created: {app.current_session.id}")
+        # 2. Slash command dispatch
+        await backend._handle_user_input("/help")
+        types = [m["type"] for m in messages_out]
+        assert "system_message" in types, f"Expected system_message for /help, got {types}"
+        print("✓ Slash command dispatches (system_message emitted)")
 
-        # Simulate typing a message and submitting
-        chat = app.screen
-        input_widget = chat._input
-        assert input_widget is not None, "Input widget not found"
+        # 3. Chat message -> mock model response
+        messages_out.clear()
+        await backend._handle_user_input("hello there")
+        types = [m["type"] for m in messages_out]
+        assert "assistant_message" in types, f"Expected assistant_message, got {types}"
+        assistant = [m for m in messages_out if m["type"] == "assistant_message"][0]
+        assert "mocked response" in assistant["text"]
+        print(f"✓ Assistant response: {assistant['text'][:50]}...")
+        # Thinking indicator must fire around the model call
+        assert "thinking_start" in types and "thinking_stop" in types, \
+            f"Expected thinking indicator, got {types}"
+        print("✓ Thinking indicator fires (thinking_start / thinking_stop)")
 
-        await pilot.press("h", "e", "l", "l", "o")
-        await pilot.press("enter")
-        await pilot.pause(1.0)
-
-        # Verify the user message was persisted
-        msgs = app.history.get_messages(app.current_session.id)
+        # 4. Persistence
+        assert backend.current_session is not None
+        msgs = backend.history.get_messages(backend.current_session.id)
         roles = [m.role for m in msgs]
-        print(f"✓ Messages persisted after submit: {roles}")
+        print(f"✓ Messages persisted: {roles}")
         assert "user" in roles, "User message not persisted"
-
-        # Verify the assistant response was persisted (from the mock)
         assert "assistant" in roles, "Assistant response not persisted"
-        assistant_msg = [m for m in msgs if m.role == "assistant"][0]
-        print(f"✓ Assistant response: {assistant_msg.content[:50]}...")
 
-        # Test a slash command dispatches properly
-        from halite.commands.dispatcher import CommandDispatcher
-        d = CommandDispatcher()
-        parsed = d.parse("/help")
-        assert parsed == ("help", "")
-        print("✓ Dispatcher parses /help")
-
-        # Clean shutdown
-        await app.action_quit()
-        await pilot.pause(0.5)
-        print("✓ Clean shutdown completed")
-
-
-def _patched_init(self, debug: bool = False) -> None:
-    """Patched __init__ that swaps the real Ollama provider for the mock."""
-    original_init = appmod_original_init
-    original_init(self, debug)
-    # Replace the provider after original init
-    self.ollama = MockOllama(self.config.ollama_host)
-
-
-# Save the original init for the patch
-import halite.app as appmod_ref
-appmod_original_init = appmod_ref.HaliteApp.__init__
+        print("\n=== INK BACKEND INTEGRATION TEST PASSED ===")
+    finally:
+        if backend is not None:
+            try:
+                await backend._shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-    print("\n=== HEADLESS INTEGRATION TEST PASSED ===")

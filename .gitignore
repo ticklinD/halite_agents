@@ -10,3 +10,8 @@ logs/
 .env
 .pytest_cache/
 .halite/
+
+# Ink / Node frontend
+node_modules/
+halite/ui/ink/dist/
+halite/ui/ink/package-lock.json

@@ -3,9 +3,12 @@
 # Install with one of:
 #   python3 -m pip install -r requirements.txt
 #   uv pip install --python .venv/bin/python -r requirements.txt
+#
+# NOTE: The TUI frontend is built with Ink (Node.js/React), NOT Textual.
+# See README.md "Install" for the full setup (Node deps live in
+# halite/ui/ink/package.json and are installed via `npm install`).
 
-# --- UI / foundation ---
-textual>=0.40.0
+# --- Foundation ---
 rich>=13.0
 pydantic>=2.0
 loguru>=0.7
