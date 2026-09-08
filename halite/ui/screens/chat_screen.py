@@ -50,7 +50,8 @@ class ChatScreen(Screen):
         yield Header(show_clock=True)
 
         # Thinking area — hidden by default, shown when model is working
-        with Vertical(id="thinking-area"):
+        self._thinking_area = Vertical(id="thinking-area")
+        with self._thinking_area:
             self._thinking = ThinkingIndicator(spinner="helix")
             yield self._thinking
 

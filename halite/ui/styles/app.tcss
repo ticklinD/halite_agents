@@ -170,16 +170,3 @@ Footer {
 Scrollbar {
     background: #1a1b26;
 }
-
-Scrollbar-thumb {
-    background: #3b4261;
-}
-
-Scrollbar-thumb:hover {
-    background: #565f89;
-}
-
-/* ─── Selection highlight ────────────────────────────────────────── */
-::selection {
-    background: #283457;
-}
