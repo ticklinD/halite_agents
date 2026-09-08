@@ -1,0 +1,66 @@
+/* Halite TUI Stylesheet (§4, Textual) */
+
+/* App-wide defaults */
+Screen {
+    background: $surface;
+    color: $text;
+}
+
+/* Header bar */
+Header {
+    background: $accent-darken-2;
+    color: $text;
+    dock: top;
+}
+
+/* Chat display area */
+#chat-display-container {
+    height: 1fr;
+    overflow: hidden;
+}
+
+#chat-display {
+    background: $surface;
+    color: $text;
+    padding: 0 1;
+}
+
+/* Input bar at bottom */
+#input-bar {
+    background: $surface-darken-1;
+    height: 3;
+    dock: bottom;
+    border-top: solid $accent;
+}
+
+#chat-input {
+    background: $surface;
+    color: $text;
+    height: 3;
+}
+
+/* Status bar — bottom-most */
+StatusBar {
+    dock: bottom;
+    height: 1;
+    background: $accent-darken-2;
+    color: $text;
+}
+
+/* Log panel — hidden by default */
+LogPanel {
+    display: none;
+}
+
+LogPanel.visible {
+    display: block;
+}
+
+/* Diff view — hidden by default */
+DiffView {
+    display: none;
+}
+
+DiffView.visible {
+    display: block;
+}
