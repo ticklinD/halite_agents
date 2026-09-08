@@ -15,7 +15,7 @@ export type PythonToInk =
   | { type: 'thinking_stop' }
   | { type: 'thinking_label'; label: string }
   | { type: 'tool_result'; tool: string; output: string; success: boolean }
-  | { type: 'status_update'; model?: string; backend?: string; cost?: string }
+  | { type: 'status_update'; model?: string; backend?: string; cost?: string; session_id?: string; cwd?: string }
   | { type: 'command_response'; text: string; action?: string }
   | { type: 'quit' }
 

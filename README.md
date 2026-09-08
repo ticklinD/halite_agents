@@ -32,6 +32,25 @@ npm run build      # compiles TypeScript to dist/
 cd ../..
 ```
 
+## UI
+
+Hermes-inspired Ink frontend with:
+
+- Big block-letter **HALITE** ASCII banner (gold gradient, responsive: full
+  art → compact rule → text on narrow terminals)
+- Hermes dark theme: `#101014` bg, `#CD7F32` bronze border, `#FFD700` gold
+  primary, `#FFBF00` accent, `#FFF8DC` cornsilk text
+- Message lines: `❯` user / `◆` assistant glyphs with `[HH:MM]` timestamps,
+  dim `└─ Response` separator after model output, round-bordered tool boxes
+  (`⚡ read_file [OK]`), dim `·` system events, `✕` errors
+- Live thinking trail while the model works: braille spinner (`unicode-animations`
+  helix/breathe/orbit variants) + `thinking · 3.2s` elapsed clock
+- Status bar: `Halite v0.1.0 │ qwen3.5:0.8b │ local_ollama │ cwd │ session`
+
+The TUI renders **inline** (no alternate screen buffer) — it appends to the
+terminal like normal command output, so there's no cropping regardless of
+terminal size or font.
+
 ## Run
 
 ```bash

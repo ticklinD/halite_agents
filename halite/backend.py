@@ -53,6 +53,8 @@ class HaliteBackend:
         self.debug_panel = None
 
         # Session
+        self._quit_requested = False
+        self._stdin_thread: threading.Thread | None = None
         self.current_session: Session | None = None
         self.new_session()
 
@@ -160,6 +162,8 @@ class HaliteBackend:
         loop = asyncio.get_event_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
+        self._stdin_thread: threading.Thread | None = None
+
         def _reader() -> None:
             try:
                 while True:
@@ -174,7 +178,8 @@ class HaliteBackend:
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        threading.Thread(target=_reader, name="halite-stdin", daemon=True).start()
+        self._stdin_thread = threading.Thread(target=_reader, name="halite-stdin", daemon=True)
+        self._stdin_thread.start()
 
         buffer = ""
         while True:
@@ -205,7 +210,14 @@ class HaliteBackend:
                 await self._handle_user_input(text)
         elif msg_type == "quit":
             await self._shutdown()
-            sys.exit(0)
+            self._quit_requested = True
+            # Close stdin so the reader thread sees EOF and exits cleanly
+            # instead of being torn down mid-readline (avoids the
+            # "_enter_buffered_busy" interpreter-shutdown crash).
+            try:
+                sys.stdin.close()
+            except Exception:
+                pass
 
     async def _on_ready(self) -> None:
         """Frontend is ready — send welcome + discover models."""
@@ -216,7 +228,13 @@ class HaliteBackend:
         await self._send({"type": "ready"})
         if not self.active_model:
             await self._discover_models()
-        await self._send({"type": "status_update", "model": self.active_model or "none", "backend": self.active_backend})
+        await self._send({
+            "type": "status_update",
+            "model": self.active_model or "none",
+            "backend": self.active_backend,
+            "session_id": str(self.current_session.id) if self.current_session else None,
+            "cwd": str(Path.cwd()),
+        })
 
     # ── Message handling ────────────────────────────────────────────
 
