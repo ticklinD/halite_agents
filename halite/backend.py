@@ -11,8 +11,10 @@ import signal
 import sys
 from typing import Any, Literal
 
-from halite.models.schemas import Message, Session
-from halite.config.settings import load_config, AppConfig
+from halite.models.schemas import (
+    AppConfig, Message, Session, UsageRecord,
+)
+from halite.config.settings import load_config
 from halite.commands.dispatcher import CommandDispatcher
 from halite.commands.handlers import register_handlers
 from halite.storage.history import HistoryStore
@@ -442,6 +444,37 @@ class HaliteBackend:
         import re
         return re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL).strip()
 
+    # ── Usage tracking (§7.2) ──────────────────────────────────────
+
+    # Approximate cost per 1M tokens (USD). Updated for 2025-era pricing.
+    _API_COST_PER_M_IN = 15.0   # ~$15/M input tokens (Claude Sonnet class)
+    _API_COST_PER_M_OUT = 75.0  # ~$75/M output tokens
+
+    def _compute_cost(self, tokens_in: int, tokens_out: int) -> float:
+        """Compute USD cost from token counts."""
+        return (
+            tokens_in / 1_000_000 * self._API_COST_PER_M_IN
+            + tokens_out / 1_000_000 * self._API_COST_PER_M_OUT
+        )
+
+    def _record_usage(self, provider: str, tokens_in: int, tokens_out: int) -> None:
+        """Persist a usage record to HistoryStore (§7.2)."""
+        if self.current_session is None:
+            return
+        cost = self._compute_cost(tokens_in, tokens_out)
+        record = UsageRecord(
+            session_id=self.current_session.id,
+            provider=provider,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost,
+        )
+        self.history.add_usage_record(record)
+        logger.info(
+            "Usage recorded: provider={}, tokens_in={}, tokens_out={}, cost=${:.4f}",
+            provider, tokens_in, tokens_out, cost,
+        )
+
     async def _run_agent_loop(self, messages: list[dict]) -> str:
         """Core agent loop: call model → parse tool calls → execute → feed
         back → repeat until a final answer or max iterations (§6.4).
@@ -479,8 +512,10 @@ class HaliteBackend:
                 if not key:
                     return "[ERROR: No API key configured]"
                 provider = APIProvider(api_key=key, model=self.active_model)
-                response = await provider.chat(loop_messages)
+                response, tokens_in, tokens_out = await provider.chat_with_usage(loop_messages)
                 await provider.close()
+                # Record API usage (§7.2)
+                self._record_usage("anthropic", tokens_in, tokens_out)
             else:
                 response = await self.ollama.chat(self.active_model, loop_messages)
 
