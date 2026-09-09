@@ -3,10 +3,11 @@ import { Box, Static } from 'ink'
 import { ChatDisplay, type ChatLineWithMeta } from './components/ChatDisplay.js'
 import { InputBar } from './components/InputBar.js'
 import { StatusBar } from './components/StatusBar.js'
-import { Banner } from './components/Banner.js'
 import { ConfirmPrompt } from './components/ConfirmPrompt.js'
+import { HistoryScreen } from './components/HistoryScreen.js'
+import { ConfigScreen } from './components/ConfigScreen.js'
 import { BackendClient } from './backendClient.js'
-import type { PythonToInk, ConfirmPayload } from './lib/ipcTypes.js'
+import type { PythonToInk, ConfirmPayload, HistoryEntry, ConfigField, ChatHistoryMessage } from './lib/ipcTypes.js'
 
 type Props = {
   backend: BackendClient
@@ -22,8 +23,8 @@ interface ActiveConfirm {
 // The terminal screen is split into two regions:
 //
 //  1. STATIC (scrollback) — written once, never redrawn:
-//       ONE <Static> block holds the Banner (first item) and every
-//       committed chat line (one item per line). Ink writes each item
+//       ONE <Static> block holds every committed chat line (one item per
+//       line). Ink writes each item
 //       to the terminal exactly once and NEVER re-diffs/redraws it;
 //       subsequent frames only append NEW static items. This fixes the
 //       stacked-duplicate-banner and interleaved-text corruption: those
@@ -57,6 +58,12 @@ export default function App({ backend }: Props) {
   const [cwd, setCwd] = useState('')
   const [inputDisabled, setInputDisabled] = useState(false)
   const [activeConfirm, setActiveConfirm] = useState<ActiveConfirm | null>(null)
+
+  // Item 1: /history + /config screens
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historySessions, setHistorySessions] = useState<HistoryEntry[]>([])
+  const [configOpen, setConfigOpen] = useState(false)
+  const [configFields, setConfigFields] = useState<ConfigField[]>([])
 
   // Coalescing timer for startup bursts
   const burstTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -105,6 +112,28 @@ export default function App({ backend }: Props) {
         case 'ready':
           setInputDisabled(false)
           break
+        case 'history_data':
+          setHistorySessions(msg.sessions)
+          setHistoryOpen(true)
+          break
+        case 'config_data':
+          setConfigFields(msg.fields)
+          setConfigOpen(true)
+          break
+        case 'config_saved':
+          setConfigOpen(false)
+          break
+        case 'resume_ok':
+          // Load the resumed session's messages into the chat
+          setHistoryOpen(false)
+          const resumedLines: ChatLineWithMeta[] = msg.messages.map(m => ({
+            role: (m.role === 'tool' ? 'tool' : m.role === 'user' ? 'user' : m.role === 'assistant' ? 'assistant' : 'system') as ChatLineWithMeta['role'],
+            text: m.content,
+            ts: m.created_at ? Date.parse(m.created_at) : Date.now(),
+            model: m.model_used,
+          }))
+          setLines(prev => [...prev, ...resumedLines])
+          break
         case 'quit':
           process.exit(0)
       }
@@ -136,6 +165,15 @@ export default function App({ backend }: Props) {
         setInputDisabled(true)
         return
       }
+
+      // Command actions also act immediately — they open screens.
+      if (msg.type === 'command_action') {
+        // The data messages (history_data / config_data) that follow
+        // carry the actual content and open the screen. The
+        // command_response/system_message for these is redundant noise
+        // in the chat, so we swallow it here.
+        return
+      }
       enqueue(msg)
     }
 
@@ -163,6 +201,16 @@ export default function App({ backend }: Props) {
     setInputDisabled(false)
   }, [backend])
 
+  // /history — resume a past session
+  const handleResumeSession = useCallback((sessionId: string) => {
+    backend.send({ type: 'resume_session', session_id: sessionId })
+  }, [backend])
+
+  // /config — save settings
+  const handleConfigSave = useCallback((updates: Record<string, string | number | boolean>) => {
+    backend.send({ type: 'config_update', updates })
+  }, [backend])
+
   // Graceful quit: tell the backend to shut down, then exit once it's done
   const handleQuit = useCallback(() => {
     backend.stop()
@@ -181,16 +229,9 @@ export default function App({ backend }: Props) {
         no matter how many messages/confirms follow, and every
         committed line renders exactly once.
       */}
-      <Static items={[0, ...lines.map((_, i) => i + 1)]}>
+      <Static items={lines.map((_, i) => i)}>
         {(item: number) => {
-          if (item === 0) {
-            return (
-              <Box key={`banner-${item}`} flexDirection="column">
-                <Banner />
-              </Box>
-            )
-          }
-          const line = lines[item - 1]
+          const line = lines[item]
           return (
             <ChatDisplay
               key={`line-${item}`}
@@ -228,6 +269,24 @@ export default function App({ backend }: Props) {
             kind={activeConfirm.kind}
             payload={activeConfirm.payload}
             onRespond={handleConfirmResponse}
+          />
+        )}
+
+        {/* /history screen */}
+        {historyOpen && (
+          <HistoryScreen
+            sessions={historySessions}
+            onResume={handleResumeSession}
+            onClose={() => setHistoryOpen(false)}
+          />
+        )}
+
+        {/* /config screen */}
+        {configOpen && (
+          <ConfigScreen
+            fields={configFields}
+            onSave={handleConfigSave}
+            onClose={() => setConfigOpen(false)}
           />
         )}
 
