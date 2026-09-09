@@ -31,21 +31,6 @@ export class BackendClient extends EventEmitter {
   private ready = false
 
   start(projectDir: string): void {
-    // Test seam: HALITE_FAKE_BACKEND lets integration tests substitute a
-    // scripted backend (JSON-over-stdio) without touching production code.
-    // Value is a full command line, e.g. "python3 /path/to/fake.py".
-    const fake = process.env.HALITE_FAKE_BACKEND
-    if (fake) {
-      const [cmd, ...args] = fake.split(/\s+/)
-      this.proc = spawn(cmd, args, {
-        cwd: projectDir,
-        env: { ...process.env, HALITE_ROOT: projectDir },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      this.wireStdio()
-      return
-    }
-
     const python = resolvePython()
     const args = ['-m', 'halite.backend']
 
