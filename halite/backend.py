@@ -22,6 +22,7 @@ from halite.models.local_provider import OllamaProvider
 from halite.models.capability_registry import CapabilityRegistry
 from halite.core.classifier import IntentClassifier
 from halite.core.router import Router
+from halite.core.context_manager import ContextManager
 from halite.tools.base import ToolExecutor
 from halite.utils.logging_config import (
     setup_logging, install_exception_hook, logger,
@@ -64,6 +65,16 @@ class HaliteBackend:
         # Router / model layer
         self.ollama = OllamaProvider(host=self.config.ollama_host)
         self.capabilities = CapabilityRegistry()
+
+        # Context window management (§7.7) — sized from the active model's
+        # capability when known, else a conservative default.
+        _win = 4096
+        try:
+            if self.active_model:
+                _win = self.capabilities.get(self.active_model).context_window
+        except Exception:
+            pass
+        self.context_manager = ContextManager(context_window=_win)
 
         # Classifier + router (§6.1) — created before new_session() so
         # new_session can reset stickiness.
@@ -161,6 +172,14 @@ class HaliteBackend:
         if self.current_session:
             self.current_session.active_model = pick
             self.current_session.backend = self.active_backend
+
+        # Sync context manager window to the model's capability (§7.7)
+        try:
+            self.context_manager.set_context_window(
+                self.capabilities.get(pick).context_window
+            )
+        except Exception:
+            logger.debug("Could not sync context window for {}", pick)
 
         await self._send({"type": "status_update", "model": pick, "backend": self.active_backend})
 
@@ -365,6 +384,27 @@ class HaliteBackend:
         for m in history:
             if m.role in ("user", "assistant"):
                 messages.append({"role": m.role, "content": m.content})
+
+        # ── Context window management (§7.7) ──
+        ctx = self.context_manager
+        ctx.clear()
+        for m in messages:
+            ctx.add_message(m["role"], m["content"])
+        if ctx.needs_summarization():
+            logger.info(
+                "Context manager triggered ({} tokens >= threshold {}) — compacting",
+                ctx.token_count(), ctx.resume_threshold,
+            )
+            result = ctx.summarize_old_turns(recent_keep=4)
+            if result["summarized"]:
+                messages = result["messages"]
+                await self._send({
+                    "type": "system_message",
+                    "text": (
+                        "Context window exceeded — older turns were compacted "
+                        f"to fit the {ctx.context_window}-token window."
+                    ),
+                })
 
         await self._route_and_respond(messages)
 
