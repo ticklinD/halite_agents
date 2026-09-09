@@ -290,6 +290,15 @@ class HaliteBackend:
             if result.message:
                 await self._send({"type": "system_message", "text": result.message})
 
+            # Forward the action hint so the Ink frontend can react
+            # (e.g. show_models opens the model picker).
+            if result.action:
+                await self._send({
+                    "type": "command_action",
+                    "action": result.action,
+                    "message": result.message or "",
+                })
+
             self._persist_message("user", text)
             return
 

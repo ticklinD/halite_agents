@@ -49,7 +49,40 @@ def register_handlers(dispatcher, app: "HaliteApp") -> None:
         # §6.1: when user explicitly switches models, reset task stickiness
         # so the new backend takes effect immediately.
         app._current_task_backend = None
-        return CommandResult(handled=True, action="show_models", message="Model selector")
+
+        # Query Ollama live for installed models
+        local_models: list[str] = []
+        try:
+            models = await app.ollama.list_models()
+            local_models = [m.get("name", m.get("model", "")) for m in models]
+        except Exception as exc:
+            logger.warning("Failed to list Ollama models: {}", exc)
+
+        # Configured API models (from the default built-in registry)
+        api_models = [
+            "claude-sonnet-4-20250514",
+            "claude-3-5-sonnet-20241022",
+        ]
+
+        # Build the response
+        lines = ["Available models:"]
+        lines.append("")
+        if local_models:
+            lines.append("  Local (Ollama):")
+            for name in local_models:
+                marker = " *" if name == app.active_model else ""
+                lines.append(f"    {name}{marker}")
+        else:
+            lines.append("  Local (Ollama): (none installed)")
+        lines.append("")
+        lines.append("  API:")
+        for name in api_models:
+            marker = " *" if name == app.active_model else ""
+            lines.append(f"    {name}{marker}")
+
+        message = "\n".join(lines)
+
+        return CommandResult(handled=True, action="show_models", message=message)
 
     async def cmd_history(args: str) -> CommandResult:
         """Browse and resume past sessions — /history."""

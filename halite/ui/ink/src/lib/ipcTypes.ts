@@ -17,6 +17,7 @@ export type PythonToInk =
   | { type: 'tool_result'; tool: string; output: string; success: boolean }
   | { type: 'status_update'; model?: string; backend?: string; cost?: string; session_id?: string; cwd?: string }
   | { type: 'command_response'; text: string; action?: string }
+  | { type: 'command_action'; action: string; message?: string }
   | { type: 'confirm_request'; id: string; kind: string; payload: ConfirmPayload }
   | { type: 'quit' }
 
