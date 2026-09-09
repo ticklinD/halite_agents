@@ -84,15 +84,11 @@ class BrowserTool(BaseTool):
             )
 
     async def _open(self, args: dict[str, Any], call_id: str) -> ToolResult:
-        from playwright.async_api import async_playwright
-
         timeout = args.get("timeout", 15)
         try:
-            pw = async_playwright()
-            self._playwright_ctx = await pw.start()
-            browser = await self._playwright_ctx.chromium.launch(headless=True)
+            # Use the shared lazy-launch helper — no duplicated launch logic.
+            browser = await self._ensure_browser()
             page = await browser.new_page()
-            self._browser = browser
             self._page = page
 
             await page.goto(args["url"], wait_until="load", timeout=timeout * 1000)
@@ -262,7 +258,8 @@ class BrowserTool(BaseTool):
         except Exception:
             pass
         try:
-            if hasattr(self, "_playwright_ctx"):
-                await self._playwright_ctx.stop()
+            if self._playwright is not None:
+                await self._playwright.stop()
+                self._playwright = None
         except Exception:
             pass
