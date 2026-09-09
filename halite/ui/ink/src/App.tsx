@@ -4,11 +4,18 @@ import { ChatDisplay, type ChatLineWithMeta } from './components/ChatDisplay.js'
 import { InputBar } from './components/InputBar.js'
 import { StatusBar } from './components/StatusBar.js'
 import { Banner } from './components/Banner.js'
+import { ConfirmPrompt } from './components/ConfirmPrompt.js'
 import { BackendClient } from './backendClient.js'
-import type { PythonToInk } from './lib/ipcTypes.js'
+import type { PythonToInk, ConfirmPayload } from './lib/ipcTypes.js'
 
 type Props = {
   backend: BackendClient
+}
+
+interface ActiveConfirm {
+  id: string
+  kind: string
+  payload: ConfirmPayload
 }
 
 // Startup burst coalescing: the backend emits welcome, ready, and
@@ -31,6 +38,7 @@ export default function App({ backend }: Props) {
   const [sessionId, setSessionId] = useState('')
   const [cwd, setCwd] = useState('')
   const [inputDisabled, setInputDisabled] = useState(false)
+  const [activeConfirm, setActiveConfirm] = useState<ActiveConfirm | null>(null)
 
   // Coalescing timer for startup bursts
   const burstTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -96,6 +104,20 @@ export default function App({ backend }: Props) {
   // Subscribe to backend messages
   useEffect(() => {
     const onMessage = (msg: PythonToInk) => {
+      // Confirm requests are urgent — handle immediately, not coalesced.
+      if (msg.type === 'confirm_request') {
+        if (burstTimer.current) {
+          clearTimeout(burstTimer.current)
+          flush()
+        }
+        setActiveConfirm({
+          id: msg.id,
+          kind: msg.kind,
+          payload: msg.payload,
+        })
+        setInputDisabled(true)
+        return
+      }
       enqueue(msg)
     }
 
@@ -104,7 +126,7 @@ export default function App({ backend }: Props) {
       backend.removeListener('message', onMessage)
       if (burstTimer.current) clearTimeout(burstTimer.current)
     }
-  }, [backend, enqueue])
+  }, [backend, enqueue, flush])
 
   // Flush any pending burst on unmount (safety)
   useEffect(() => {
@@ -115,6 +137,12 @@ export default function App({ backend }: Props) {
 
   const handleSubmit = useCallback((text: string) => {
     backend.send({ type: 'user_input', text })
+  }, [backend])
+
+  const handleConfirmResponse = useCallback((id: string, approved: boolean) => {
+    backend.send({ type: 'confirm_response', id, approved })
+    setActiveConfirm(null)
+    setInputDisabled(false)
   }, [backend])
 
   // Graceful quit: tell the backend to shut down, then exit once it's done
@@ -136,11 +164,21 @@ export default function App({ backend }: Props) {
           thinkingLabel={thinking.label}
           thinkingStart={thinking.start}
         />
+
+        {/* Confirmation prompt — shown inline when Python asks for user approval */}
+        {activeConfirm && (
+          <ConfirmPrompt
+            id={activeConfirm.id}
+            kind={activeConfirm.kind}
+            payload={activeConfirm.payload}
+            onRespond={handleConfirmResponse}
+          />
+        )}
       </Box>
 
       {/* Input bar */}
       <Box>
-        <InputBar onSubmit={handleSubmit} disabled={inputDisabled} onQuit={handleQuit} />
+        <InputBar onSubmit={handleSubmit} disabled={inputDisabled || activeConfirm !== null} onQuit={handleQuit} />
       </Box>
 
       {/* Status bar — model │ backend │ cwd │ session */}

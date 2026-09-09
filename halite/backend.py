@@ -9,7 +9,7 @@ import asyncio
 import json
 import signal
 import sys
-from typing import Any
+from typing import Any, Literal
 
 from halite.models.schemas import Message, Session
 from halite.config.settings import load_config, AppConfig
@@ -76,6 +76,11 @@ class HaliteBackend:
         # Command dispatcher
         self.dispatcher = CommandDispatcher()
         register_handlers(self.dispatcher, self)
+
+        # Confirmation gate — Python side: Futures awaiting the Ink reply.
+        # Keyed by a UUID string; _read_loop resolves them when
+        # confirm_response arrives on stdin.
+        self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
 
         # Detect models
         self._detect_models()
@@ -218,6 +223,13 @@ class HaliteBackend:
                 sys.stdin.close()
             except Exception:
                 pass
+        elif msg_type == "confirm_response":
+            confirm_id = msg.get("id", "")
+            approved = bool(msg.get("approved", False))
+            fut = self._pending_confirms.get(confirm_id)
+            if fut is not None and not fut.done():
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(fut.set_result, approved)
 
     async def _on_ready(self) -> None:
         """Frontend is ready — send welcome + discover models."""
@@ -323,20 +335,58 @@ class HaliteBackend:
             logger.exception("Failed to get model response: {}", str(exc))
             await self._send({"type": "error_message", "text": f"Failed to get model response: {exc}"})
 
-    # ── Confirmation callbacks ──────────────────────────────────────
+    # ── Confirmation gate (§6.4 / §7.4) ─────────────────────────────
+
+    async def request_confirmation(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        timeout: float = 60.0,
+    ) -> bool:
+        """Send a confirm_request to the Ink frontend and block until the
+        user answers or *timeout* seconds elapse.  Returns True when
+        approved, False otherwise.
+
+        The caller must never return before the user has actually
+        answered — the whole point of the gate is to pause the agent.
+        """
+        confirm_id = str(uuid4())[:12]
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+        self._pending_confirms[confirm_id] = fut
+
+        await self._send({
+            "type": "confirm_request",
+            "id": confirm_id,
+            "kind": kind,
+            "payload": payload,
+        })
+
+        try:
+            approved = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Confirm {} timed out ({}s) — defaulting to denied", confirm_id, timeout)
+            approved = False
+
+        self._pending_confirms.pop(confirm_id, None)
+        return approved
+
+    # ── Confirmation callbacks (wired to tools) ──────────────────────
 
     async def _confirm_diff(self, path: Path, old_content: str, new_content: str) -> bool:
         if self.config.trust_level == "auto":
             return True
-        await self._send({"type": "system_message", "text": f"Overwrite existing file {path}?"})
-        return True
+        return await self.request_confirmation("diff", {
+            "path": str(path),
+            "old_preview": (old_content[:800] + "...") if len(old_content) > 800 else old_content,
+            "new_preview": (new_content[:800] + "...") if len(new_content) > 800 else new_content,
+        })
 
     async def _confirm_dangerous(self, command: str, reason: str) -> bool:
-        await self._send({
-            "type": "error_message",
-            "text": f"DANGEROUS COMMAND blocked: {command}\n  Reason: {reason}",
+        return await self.request_confirmation("dangerous", {
+            "command": command,
+            "reason": reason,
         })
-        return False
 
     # ── Persistence ─────────────────────────────────────────────────
 
