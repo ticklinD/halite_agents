@@ -357,41 +357,216 @@ class HaliteBackend:
 
         await self._route_and_respond(messages)
 
-    async def _route_and_respond(self, messages: list[dict]) -> None:
-        """Route to the appropriate backend, get a response, display it."""
-        await self._send({"type": "thinking_start", "label": "Generating…"})
+    # ── Tool-calling agent loop (§6.4) ─────────────────────────────
 
+    def _build_tool_system_prompt(self) -> str:
+        """Build a system message listing available tools for ReAct format.
+
+        For models where CapabilityRegistry.has_native_tools() is False,
+        we embed tool schemas directly in the prompt so the model knows
+        what it can call and how to format calls.
+        """
+        tools = self.executor.list_tools()
+        tool_descriptions = {
+            "terminal": (
+                "Run a shell command on the system. Args: command (str, required), "
+                "timeout (int, seconds, default 30), cwd (str, optional)."
+            ),
+            "file": (
+                "Read, write, delete, list, or diff files. Args: operation "
+                "(one of: read, write, delete, list, diff), path (str, required), "
+                "content (str, optional, for write)."
+            ),
+            "browser": (
+                "Open a URL, take a screenshot, or check the DOM. Args: operation "
+                "(one of: open, screenshot, dom_check), url (str, required)."
+            ),
+        }
+
+        lines = [
+            "You are a coding assistant with access to the following tools:",
+            "",
+        ]
+        for tool_name in tools:
+            desc = tool_descriptions.get(tool_name, f"Tool: {tool_name}")
+            lines.append(f"- {tool_name}: {desc}")
+        lines += [
+            "",
+            "To use a tool, respond with exactly this format:",
+            "<tool_call>",
+            '{"name": "<tool_name>", "arguments": {<args>}}',
+            "</tool_call>",
+            "",
+            "You may call multiple tools in sequence. After each tool call, "
+            "you will see the result. When you have enough information or the "
+            "task is complete, respond with a normal message (no tool_call tags).",
+            "Do NOT use tool_call tags for your final answer.",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_tool_calls(text: str) -> list[dict]:
+        """Extract tool call dicts from <tool_call>...</tool_call> tags.
+
+        Returns a list of dicts, each with 'name' (str) and 'arguments' (dict).
+        If no tags found, returns an empty list.
+        """
+        import re
+        pattern = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+        calls = []
+        for match in pattern.finditer(text):
+            try:
+                parsed = json.loads(match.group(1))
+                if "name" in parsed and "arguments" in parsed:
+                    calls.append({
+                        "name": parsed["name"],
+                        "arguments": parsed["arguments"],
+                    })
+            except json.JSONDecodeError:
+                continue
+        return calls
+
+    @staticmethod
+    def _strip_tool_calls(text: str) -> str:
+        """Remove <tool_call>...</tool_call> tags from model output,
+        leaving only the surrounding natural-language text."""
+        import re
+        return re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL).strip()
+
+    async def _run_agent_loop(self, messages: list[dict]) -> str:
+        """Core agent loop: call model → parse tool calls → execute → feed
+        back → repeat until a final answer or max iterations (§6.4).
+
+        Uses ReAct prompt format for models without native tool support.
+        Returns the final natural-language response.
+        """
+        from halite.models.schemas import ToolCall, ToolResult as ToolResultModel
+
+        # Determine if this model needs ReAct format
+        cap = self.capabilities.get(self.active_model)
+        use_react = not cap.supports_native_tools
+
+        # Build working messages (don't mutate the original)
+        loop_messages = list(messages)
+
+        # Prepend tool system prompt for ReAct models
+        if use_react:
+            tool_prompt = self._build_tool_system_prompt()
+            loop_messages.insert(0, {"role": "system", "content": tool_prompt})
+
+        max_iters = self.config.max_agent_iterations
+        iteration = 0
         response = ""
-        try:
+
+        while iteration < max_iters:
+            iteration += 1
+            logger.info("Agent loop iteration {}/{}", iteration, max_iters)
+
+            # Call the model
             if self.active_backend == "api":
                 from halite.models.api_provider import APIProvider
                 from halite.config.secrets import retrieve_secret
                 key = retrieve_secret("anthropic_api_key")
                 if not key:
-                    await self._send({"type": "thinking_stop"})
-                    await self._send({
-                        "type": "error_message",
-                        "text": "No Anthropic API key configured. Use /config to add one, "
-                                "or /model to switch to a local model.",
-                    })
-                    return
+                    return "[ERROR: No API key configured]"
                 provider = APIProvider(api_key=key, model=self.active_model)
-                response = await provider.chat(messages)
+                response = await provider.chat(loop_messages)
                 await provider.close()
             else:
-                response = await self.ollama.chat(self.active_model, messages)
+                response = await self.ollama.chat(self.active_model, loop_messages)
+
+            logger.info("Model response ({} chars): {}...",
+                        len(response), response[:200])
+
+            # Parse tool calls from the response
+            tool_calls = self._parse_tool_calls(response)
+
+            if not tool_calls:
+                # No tool calls → this is the final answer
+                return response
+
+            # Execute each tool call and build results
+            tool_results_text = []
+            for tc in tool_calls:
+                tool_name = tc["name"]
+                tool_args = tc["arguments"]
+
+                logger.info("Executing tool: {} with args: {}", tool_name, str(tool_args)[:200])
+
+                # Notify frontend
+                await self._send({
+                    "type": "thinking_label",
+                    "label": f"Running {tool_name}…",
+                })
+
+                # Build ToolCall and execute via ToolExecutor
+                tool_call_obj = ToolCall(
+                    message_id=uuid4(),  # placeholder
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    status="running",
+                )
+
+                try:
+                    result: ToolResultModel = await self.executor.run(tool_call_obj)
+                except Exception as exc:
+                    logger.exception("Tool execution failed: {}", str(exc))
+                    result = ToolResultModel(
+                        tool_call_id=tool_call_obj.id,
+                        success=False,
+                        output="",
+                        error=str(exc),
+                    )
+
+                # Notify frontend
+                await self._send({
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "output": result.output or result.error or "",
+                    "success": result.success,
+                })
+
+                # Build result text for the model
+                status = "SUCCESS" if result.success else "FAILED"
+                result_parts = [f"[{status}]"]
+                if result.output:
+                    result_parts.append(result.output[:2000])
+                if result.error:
+                    result_parts.append(f"Error: {result.error}")
+                tool_results_text.append("\n".join(result_parts))
+
+            # Add the assistant's tool-calling text + tool results to messages
+            # so the model sees what it asked for and what happened
+            clean_response = self._strip_tool_calls(response)
+            if clean_response:
+                loop_messages.append({"role": "assistant", "content": clean_response})
+            loop_messages.append({
+                "role": "user",
+                "content": "Tool results:\n" + "\n\n".join(tool_results_text),
+            })
+
+        # Hit max iterations — return what we have
+        logger.warning("Agent loop hit max iterations ({})", max_iters)
+        return response
+
+    async def _route_and_respond(self, messages: list[dict]) -> None:
+        """Route to the appropriate backend, run the agent loop, display it."""
+        await self._send({"type": "thinking_start", "label": "Generating…"})
+
+        try:
+            response = await self._run_agent_loop(messages)
 
             await self._send({"type": "thinking_stop"})
             await self._send({"type": "assistant_message", "text": response, "model": self.active_model})
             logger.info("Response received ({} chars)", len(response))
 
-            dog = Message(
+            msg = Message(
                 session_id=self.current_session.id,
                 role="assistant",
                 content=response,
                 model_used=self.active_model,
             )
-            self.history.add_message(dog)
+            self.history.add_message(msg)
 
         except Exception as exc:
             await self._send({"type": "thinking_stop"})
