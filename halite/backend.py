@@ -266,6 +266,12 @@ class HaliteBackend:
             if fut is not None and not fut.done():
                 loop = asyncio.get_event_loop()
                 loop.call_soon_threadsafe(fut.set_result, approved)
+        elif msg_type == "resume_session":
+            session_id = msg.get("session_id", "")
+            await self._resume_session(session_id)
+        elif msg_type == "config_update":
+            updates = msg.get("updates", {})
+            await self._apply_config_updates(updates)
 
     async def _on_ready(self) -> None:
         """Frontend is ready — send welcome + discover models."""
@@ -283,6 +289,97 @@ class HaliteBackend:
             "session_id": str(self.current_session.id) if self.current_session else None,
             "cwd": str(Path.cwd()),
         })
+
+    # ── Session resume / config update (Item 1: /history + /config screens) ──
+
+    async def _resume_session(self, session_id: str) -> None:
+        """Resume a past session from /history (§6.3)."""
+        try:
+            from uuid import UUID
+            sid = UUID(session_id)
+        except ValueError:
+            await self._send({"type": "system_message", "text": f"Invalid session id: {session_id}"})
+            return
+
+        session = self.history.get_session(sid)
+        if session is None:
+            await self._send({"type": "system_message", "text": f"Session not found: {session_id}"})
+            return
+
+        # Switch current session + reset stickiness (new context)
+        self.current_session = session
+        self._current_task_backend = None
+        self.router.clear_manual_override()
+        set_correlation_context(session_id=str(session.id))
+
+        # Load messages for the frontend
+        msgs = self.history.get_messages(sid)
+        history_msgs = [
+            {
+                "role": m.role,
+                "content": m.content,
+                "model_used": m.model_used,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in msgs
+            if m.role in ("user", "assistant", "system", "tool")
+        ]
+
+        await self._send({"type": "resume_ok", "session_id": str(session.id), "messages": history_msgs})
+        await self._send({
+            "type": "status_update",
+            "model": self.active_model or session.active_model,
+            "backend": self.active_backend,
+            "session_id": str(session.id),
+            "cwd": str(session.project_path or Path.cwd()),
+        })
+        logger.info("Resumed session {}", session.id)
+
+    async def _apply_config_updates(self, updates: dict) -> None:
+        """Apply config edits from the /config form and persist (§7.1)."""
+        try:
+            from halite.config.settings import load_config, save_config
+            cfg = load_config()
+            changed = []
+            for key, value in updates.items():
+                if not hasattr(cfg, key):
+                    logger.warning("Unknown config key: {}", key)
+                    continue
+                # Coerce types: bools come as JSON booleans, numbers as numbers
+                field_type = type(getattr(cfg, key))
+                if field_type is bool:
+                    setattr(cfg, key, bool(value))
+                elif field_type is int:
+                    setattr(cfg, key, int(value))
+                elif field_type is float:
+                    setattr(cfg, key, float(value))
+                else:
+                    setattr(cfg, key, str(value))
+                changed.append(key)
+
+            save_config(cfg)
+            self.config = cfg  # live-update the running backend
+
+            # If the backend default changed, re-detect active model
+            if "default_backend" in changed:
+                self.active_backend = cfg.default_backend
+                self._detect_models()
+
+            await self._send({
+                "type": "config_saved",
+                "message": f"Config saved: {', '.join(changed) or 'no changes'}",
+            })
+            await self._send({
+                "type": "status_update",
+                "model": self.active_model or "",
+                "backend": self.active_backend,
+                "session_id": str(self.current_session.id) if self.current_session else None,
+                "cwd": str(Path.cwd()),
+            })
+            logger.info("Config updated: {}", changed)
+        except Exception as exc:
+            logger.exception("config_update failed: {}", exc)
+            await self._send({"type": "config_saved", "message": f"Config save failed: {exc}"})
 
     # ── Message handling ────────────────────────────────────────────
 
@@ -308,7 +405,7 @@ class HaliteBackend:
                 await self._shutdown()
                 sys.exit(0)
 
-            if result.message:
+            if result.message and result.action not in ("show_history", "show_config", "show_models"):
                 await self._send({"type": "system_message", "text": result.message})
 
             # Forward the action hint so the Ink frontend can react

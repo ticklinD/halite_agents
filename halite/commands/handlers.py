@@ -85,12 +85,78 @@ def register_handlers(dispatcher, app: "HaliteApp") -> None:
         return CommandResult(handled=True, action="show_models", message=message)
 
     async def cmd_history(args: str) -> CommandResult:
-        """Browse and resume past sessions — /history."""
-        return CommandResult(handled=True, action="show_history", message="History browser")
+        """Browse and resume past sessions — /history (§6.3)."""
+        try:
+            sessions = app.history.list_sessions(limit=50)
+            # Build entries with message count + first-message preview
+            entries = []
+            for s in sessions:
+                msgs = app.history.get_messages(s.id)
+                user_msgs = [m for m in msgs if m.role == "user"]
+                preview = user_msgs[0].content[:80] if user_msgs else "(no messages)"
+                entries.append({
+                    "id": str(s.id),
+                    "project_path": str(s.project_path) if s.project_path else None,
+                    "active_model": s.active_model,
+                    "backend": s.backend,
+                    "created_at": s.created_at.isoformat(),
+                    "last_active_at": s.last_active_at.isoformat(),
+                    "message_count": len(msgs),
+                    "preview": preview,
+                })
+
+            await app._send({
+                "type": "history_data",
+                "sessions": entries,
+            })
+            return CommandResult(
+                handled=True,
+                action="show_history",
+                message=f"History: {len(entries)} session(s)",
+            )
+
+        except Exception as exc:
+            logger.exception("cmd_history failed: {}", exc)
+            return CommandResult(handled=True, message=f"History failed: {exc}")
 
     async def cmd_config(args: str) -> CommandResult:
-        """Open settings screen — /config."""
-        return CommandResult(handled=True, action="show_config", message="Config screen")
+        """Open settings screen — /config (§7.1)."""
+        try:
+            from halite.config.settings import load_config
+            cfg = load_config()
+            fields = [
+                {"key": "default_backend", "label": "Default backend", "value": cfg.default_backend, "type": "select", "options": ["local_ollama", "local_llamacpp", "api"], "help": "Backend used when no task stickiness is active"},
+                {"key": "ollama_host", "label": "Ollama host", "value": cfg.ollama_host, "type": "string", "help": "Base URL of the Ollama server"},
+                {"key": "ollama_classifier_model", "label": "Classifier model", "value": cfg.ollama_classifier_model, "type": "string", "help": "SLM used for Stage B classification"},
+                {"key": "ollama_default_model", "label": "Default Ollama model", "value": cfg.ollama_default_model or "", "type": "string", "help": "Auto-detects first installed model if empty"},
+                {"key": "llamacpp_model_path", "label": "llama.cpp model path", "value": cfg.llamacpp_model_path or "", "type": "string", "help": "Path to GGUF for llama.cpp backend"},
+                {"key": "llamacpp_models_dir", "label": "llama.cpp models dir", "value": cfg.llamacpp_models_dir or "", "type": "string", "help": "Directory to scan for GGUF models"},
+                {"key": "api_provider", "label": "API provider", "value": cfg.api_provider, "type": "select", "options": ["anthropic", "openai"], "help": "Cloud provider for API backend"},
+                {"key": "auto_approve_api", "label": "Auto-approve API calls", "value": str(cfg.auto_approve_api), "type": "boolean", "help": "Skip confirmation for API backend calls"},
+                {"key": "trust_level", "label": "Trust level", "value": cfg.trust_level, "type": "select", "options": ["manual", "auto"], "help": "manual = confirm all risky ops; auto = skip non-destructive confirmation"},
+                {"key": "max_agent_iterations", "label": "Max agent iterations", "value": str(cfg.max_agent_iterations), "type": "number", "help": "Cap on tool-call loop iterations"},
+                {"key": "browser_timeout", "label": "Browser timeout (s)", "value": str(cfg.browser_timeout), "type": "number", "help": "Timeout for BrowserTool navigation"},
+                {"key": "classifier_token_threshold", "label": "Classifier token threshold", "value": str(cfg.classifier_token_threshold), "type": "number", "help": "Above this, Stage B SLM re-checks"},
+                {"key": "classifier_local_confidence_threshold", "label": "Local confidence threshold", "value": str(cfg.classifier_local_confidence_threshold), "type": "number", "help": "Stage A must exceed this to route local"},
+                {"key": "classifier_api_confidence_threshold", "label": "API confidence threshold", "value": str(cfg.classifier_api_confidence_threshold), "type": "number", "help": "Below this, Stage B must confirm API routing"},
+                {"key": "theme", "label": "Theme", "value": cfg.theme, "type": "select", "options": ["dark", "light"], "help": "UI theme"},
+                {"key": "log_retention_days", "label": "Log retention (days)", "value": str(cfg.log_retention_days), "type": "number", "help": "Logs older than this are pruned"},
+                {"key": "debug_mode", "label": "Debug mode", "value": str(cfg.debug_mode), "type": "boolean", "help": "Verbose logging"}
+            ]
+
+            await app._send({
+                "type": "config_data",
+                "fields": fields,
+            })
+            return CommandResult(
+                handled=True,
+                action="show_config",
+                message="Config editor",
+            )
+
+        except Exception as exc:
+            logger.exception("cmd_config failed: {}", exc)
+            return CommandResult(handled=True, message=f"Config failed: {exc}")
 
     async def cmd_usage(args: str) -> CommandResult:
         """Show token/cost usage — /usage."""

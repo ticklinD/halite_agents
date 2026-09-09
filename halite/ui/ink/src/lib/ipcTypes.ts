@@ -4,6 +4,26 @@
  */
 
 // ── Python → Ink (display commands) ────────────────────────────────
+export interface HistoryEntry {
+  id: string
+  project_path: string | null
+  active_model: string
+  backend: string
+  created_at: string
+  last_active_at: string
+  message_count: number
+  preview: string
+}
+
+export interface ConfigField {
+  key: string
+  label: string
+  value: string
+  type: 'string' | 'number' | 'boolean' | 'select'
+  options?: string[]
+  help?: string
+}
+
 export type PythonToInk =
   | { type: 'ready' }
   | { type: 'welcome'; message: string }
@@ -19,7 +39,19 @@ export type PythonToInk =
   | { type: 'command_response'; text: string; action?: string }
   | { type: 'command_action'; action: string; message?: string }
   | { type: 'confirm_request'; id: string; kind: string; payload: ConfirmPayload }
+  | { type: 'history_data'; sessions: HistoryEntry[] }
+  | { type: 'config_data'; fields: ConfigField[] }
+  | { type: 'config_saved'; message: string }
+  | { type: 'resume_ok'; session_id: string; messages: ChatHistoryMessage[] }
   | { type: 'quit' }
+
+// A message in a resumed session (for /history resume → shows in chat)
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string
+  model_used?: string
+  created_at?: string
+}
 
 // ── Ink → Python (user input) ──────────────────────────────────────
 export type InkToPython =
@@ -27,6 +59,8 @@ export type InkToPython =
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'ready' }
   | { type: 'confirm_response'; id: string; approved: boolean }
+  | { type: 'resume_session'; session_id: string }
+  | { type: 'config_update'; updates: Record<string, string | number | boolean> }
   | { type: 'quit' }
 
 // ── Confirm payloads by kind ────────────────────────────────────────
