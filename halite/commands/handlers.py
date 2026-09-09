@@ -46,6 +46,9 @@ def register_handlers(dispatcher, app: "HaliteApp") -> None:
 
     async def cmd_model(args: str) -> CommandResult:
         """List and switch active model — /model."""
+        # §6.1: when user explicitly switches models, reset task stickiness
+        # so the new backend takes effect immediately.
+        app._current_task_backend = None
         return CommandResult(handled=True, action="show_models", message="Model selector")
 
     async def cmd_history(args: str) -> CommandResult:

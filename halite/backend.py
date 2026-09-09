@@ -18,6 +18,8 @@ from halite.commands.handlers import register_handlers
 from halite.storage.history import HistoryStore
 from halite.models.local_provider import OllamaProvider
 from halite.models.capability_registry import CapabilityRegistry
+from halite.core.classifier import IntentClassifier
+from halite.core.router import Router
 from halite.tools.base import ToolExecutor
 from halite.utils.logging_config import (
     setup_logging, install_exception_hook, logger,
@@ -56,11 +58,21 @@ class HaliteBackend:
         self._quit_requested = False
         self._stdin_thread: threading.Thread | None = None
         self.current_session: Session | None = None
-        self.new_session()
 
         # Router / model layer
         self.ollama = OllamaProvider(host=self.config.ollama_host)
         self.capabilities = CapabilityRegistry()
+
+        # Classifier + router (§6.1) — created before new_session() so
+        # new_session can reset stickiness.
+        self.classifier = IntentClassifier(self.config)
+        self.router = Router(self.config)
+
+        # Task stickiness — once a backend is approved for a task,
+        # don't re-classify on every turn (§6.1).
+        self._current_task_backend: str | None = None
+
+        self.new_session()
 
         # Tool executor
         self.executor = ToolExecutor(project_root=self.current_session.project_path)
@@ -102,6 +114,9 @@ class HaliteBackend:
         )
         self.current_session = session
         self.history.create_session(session)
+        # §6.1: reset task stickiness and manual override on new session
+        self._current_task_backend = None
+        self.router.clear_manual_override()
         set_correlation_context(session_id=str(session.id))
         logger.info("New session created: {}", session.id)
 
@@ -283,9 +298,57 @@ class HaliteBackend:
         await self._handle_chat_message(text)
 
     async def _handle_chat_message(self, text: str) -> None:
-        """Handle a normal chat message by routing to a model."""
+        """Handle a normal chat message — classify, route, confirm if needed,
+        then call the backend. §6.1: task-level stickiness prevents
+        re-classifying every turn of an already-approved task."""
         logger.info("Chat message received ({} chars)", len(text))
 
+        # ── §6.1 stickiness: if a backend is already approved for the
+        # current task, skip classification and use the same backend.
+        if self._current_task_backend is not None:
+            logger.info("Task stickiness active — using {}", self._current_task_backend)
+            # Still update the active backend to match
+            if self._current_task_backend == "api":
+                self.active_backend = "api"
+            else:
+                self.active_backend = "local"
+        else:
+            # ── Classify the prompt (§6.1: Stage A rules → Stage B SLM)
+            decision = self.classifier.classify(text)
+            logger.info("Classifier decision: {} (confidence={})", decision.decision, decision.confidence)
+
+            if decision.decision == "clarify":
+                # §6.1: on clarify, ask the user — don't route to any backend
+                await self._send({
+                    "type": "system_message",
+                    "text": f"I need more information to proceed. {decision.reasoning}",
+                })
+                return
+
+            # ── Route through the permission gate (§6.1)
+            backend, needs_confirmation = self.router.resolve_backend(decision)
+            logger.info("Router: {} (needs_confirmation={})", backend, needs_confirmation)
+
+            if needs_confirmation and backend == "api":
+                # §6.1: never silently auto-execute paid API without approval
+                approved = await self.request_confirmation("api", {
+                    "task_description": text[:200],
+                    "reasoning": decision.reasoning,
+                })
+                if not approved:
+                    await self._send({
+                        "type": "system_message",
+                        "text": "API call declined — staying on local model.",
+                    })
+                    # Stay on local, don't set stickiness for API
+                    backend = "local"
+
+            # Set the active backend and mark task stickiness
+            self.active_backend = "api" if backend == "api" else "local"
+            self._current_task_backend = backend
+            logger.info("Task backend set to '{}' (sticky until session reset)", backend)
+
+        # ── Build messages and call the backend
         history = self.history.get_messages(self.current_session.id)
         messages: list[dict] = []
         for m in history:
