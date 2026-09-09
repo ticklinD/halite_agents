@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { Box, Text } from 'ink'
+import React, { useState, useCallback } from 'react'
+import { Box, Text, useInput } from 'ink'
 import { theme } from '../lib/theme.js'
 import type {
   ConfirmPayload,
@@ -94,10 +94,12 @@ function CustomPrompt({ payload }: { payload: ConfirmCustomPayload }) {
 }
 
 export function ConfirmPrompt({ id, kind, payload, onRespond }: ConfirmPromptProps) {
-  // [y] Approve  /  [n] Decline  — read from stdin via keypress.
-  // Use process.stdin directly for raw keypress mode so we don't interfere
-  // with Ink's own input capture (the main InputBar is disabled while a
-  // confirm is active).
+  // [y] Approve  /  [n] Decline  — via Ink's useInput hook.
+  // Ink owns stdin (raw mode + parsing) and routes every keypress to all
+  // mounted useInput handlers. The InputBar is disabled while a confirm is
+  // active, so it ignores keys; we act on them here. No manual
+  // process.stdin.setRawMode toggling — that was fighting Ink's stdin
+  // ownership and could leave the terminal in a broken raw state.
   const [answered, setAnswered] = useState(false)
   const [result, setResult] = useState<'approved' | 'denied' | null>(null)
 
@@ -108,28 +110,14 @@ export function ConfirmPrompt({ id, kind, payload, onRespond }: ConfirmPromptPro
     onRespond(id, approved)
   }, [answered, id, onRespond])
 
-  useEffect(() => {
-    if (!process.stdin.setRawMode) return
-    const wasRaw = process.stdin.isRaw
-    process.stdin.setRawMode(true)
-    process.stdin.resume()
-
-    const onData = (chunk: Buffer) => {
-      // 'y' / Enter = approve, 'n' / Escape / Ctrl+C = decline
-      const ch = chunk.toString()
-      if (ch === 'y' || ch === 'Y' || ch === '\r' || ch === '\n') {
-        respond(true)
-      } else if (ch === 'n' || ch === 'N' || ch === '\x1b' || ch === '\x03') {
-        respond(false)
-      }
+  useInput((input, key) => {
+    // 'y' / Enter = approve; 'n' / Escape / Ctrl+C = decline
+    if (input === 'y' || input === 'Y' || key.return) {
+      respond(true)
+    } else if (input === 'n' || input === 'N' || key.escape || (key.ctrl && input === 'c')) {
+      respond(false)
     }
-    process.stdin.on('data', onData)
-
-    return () => {
-      process.stdin.removeListener('data', onData)
-      process.stdin.setRawMode(wasRaw ?? false)
-    }
-  }, [respond])
+  })
 
   if (answered) {
     return (

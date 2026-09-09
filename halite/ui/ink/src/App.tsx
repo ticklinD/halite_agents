@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { Box } from 'ink'
+import { Box, Static } from 'ink'
 import { ChatDisplay, type ChatLineWithMeta } from './components/ChatDisplay.js'
 import { InputBar } from './components/InputBar.js'
 import { StatusBar } from './components/StatusBar.js'
@@ -17,6 +17,24 @@ interface ActiveConfirm {
   kind: string
   payload: ConfirmPayload
 }
+
+// ── RENDERING MODEL ────────────────────────────────────────────────
+// The terminal screen is split into two regions:
+//
+//  1. STATIC (scrollback) — written once, never redrawn:
+//       ONE <Static> block holds the Banner (first item) and every
+//       committed chat line (one item per line). Ink writes each item
+//       to the terminal exactly once and NEVER re-diffs/redraws it;
+//       subsequent frames only append NEW static items. This fixes the
+//       stacked-duplicate-banner and interleaved-text corruption: those
+//       items were plain dynamic children, so Ink re-rendered them on
+//       every state change and the redraw math drifted.
+//
+//  2. LIVE (re-rendered each frame) — ONE contiguous bottom block:
+//       thinking indicator, ConfirmPrompt, StatusBar, InputBar.
+//       Ink's cursor-based redraw (log-update) only touches this block.
+//       It sits entirely below the static scrollback, so the cursor
+//       math cannot drift onto the banner/chat rows.
 
 // Startup burst coalescing: the backend emits welcome, ready, and
 // status_update in rapid succession at boot. Without batching, each one
@@ -153,17 +171,55 @@ export default function App({ backend }: Props) {
 
   return (
     <Box flexDirection="column">
-      {/* Banner — big block-letter HALITE art (stable height) */}
-      <Banner />
+      {/*
+        ── STATIC SCROLLBACK ──────────────────────────────────────
+        ONE <Static> block renders the banner + every committed chat
+        line permanently above the live region. Ink's Static uses
+        position:absolute and writes each item to the terminal exactly
+        once — new items append below old ones, old items are NEVER
+        re-diffed or redrawn. So the banner (first item) renders once
+        no matter how many messages/confirms follow, and every
+        committed line renders exactly once.
+      */}
+      <Static items={[0, ...lines.map((_, i) => i + 1)]}>
+        {(item: number) => {
+          if (item === 0) {
+            return (
+              <Box key={`banner-${item}`} flexDirection="column">
+                <Banner />
+              </Box>
+            )
+          }
+          const line = lines[item - 1]
+          return (
+            <ChatDisplay
+              key={`line-${item}`}
+              lines={[line]}
+              thinkingActive={false}
+              thinkingLabel=""
+              thinkingStart={undefined}
+            />
+          )
+        }}
+      </Static>
 
-      {/* Chat area — grows with messages */}
+      {/*
+        ── LIVE REGION (re-rendered each frame) ──────────────────
+        ONE contiguous bottom block: thinking indicator, confirm
+        prompt, status bar, input bar. All live content lives here and
+        nowhere else — Ink's cursor-based redraw (log-update) only
+        touches this block, which sits below the static scrollback, so
+        the cursor math can't drift onto the banner/chat rows.
+      */}
       <Box flexDirection="column">
-        <ChatDisplay
-          lines={lines}
-          thinkingActive={thinking.active}
-          thinkingLabel={thinking.label}
-          thinkingStart={thinking.start}
-        />
+        {thinking.active && thinking.start && (
+          <ChatDisplay
+            lines={[]}
+            thinkingActive={thinking.active}
+            thinkingLabel={thinking.label}
+            thinkingStart={thinking.start}
+          />
+        )}
 
         {/* Confirmation prompt — shown inline when Python asks for user approval */}
         {activeConfirm && (
@@ -174,16 +230,16 @@ export default function App({ backend }: Props) {
             onRespond={handleConfirmResponse}
           />
         )}
-      </Box>
 
-      {/* Input bar */}
-      <Box>
-        <InputBar onSubmit={handleSubmit} disabled={inputDisabled || activeConfirm !== null} onQuit={handleQuit} />
-      </Box>
+        {/* Status bar — model │ backend │ cwd │ session */}
+        <Box marginTop={1}>
+          <StatusBar model={model} backend={backendName} cwd={cwd} sessionId={sessionId} />
+        </Box>
 
-      {/* Status bar — model │ backend │ cwd │ session */}
-      <Box marginTop={1}>
-        <StatusBar model={model} backend={backendName} cwd={cwd} sessionId={sessionId} />
+        {/* Input bar */}
+        <Box>
+          <InputBar onSubmit={handleSubmit} disabled={inputDisabled || activeConfirm !== null} onQuit={handleQuit} />
+        </Box>
       </Box>
     </Box>
   )
